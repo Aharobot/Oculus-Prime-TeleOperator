@@ -1,0 +1,659 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:View xmlns:fx="http://ns.adobe.com/mxml/2009" backgroundColor="#ffffff"
+		xmlns:s="library://ns.adobe.com/flex/spark"  
+		actionBarVisible="false" overlayControls="false" creationComplete="init()" tabBarVisible="false" title="OCULUS PRIME"
+		deactivate="quit();" >
+	<!-- deactivate="NativeApplication.nativeApplication.exit();" -->
+	<!-- deactivate="quit();" -->
+
+	<fx:Script>
+		<![CDATA[
+			
+			/* 
+			views required:
+			command log
+			video
+			controls
+			controls overlay (one big button)
+			menu
+			hijack/login menu
+			'toast' message box (always visible--tie to video[wtf])
+			
+			controls overlay action:
+			hidden by default.
+			<50ms tap anywhere on screen to activate all keys bright, >50ms to fire key (if touching key)
+			if no key pressed, turn all off after delay
+			if key pressed, flash key, dim all other keys, turn all off after delay
+			done: check mouse pos and determine if over key, since button event only works on mouseUp
+			
+			TODO: 
+			-what to do if hijacked
+			-'passenger' in status bar
+			-android sound wtf??? see http://www.adobe.com/devnet/flex/articles/flex-mobile-performance-checklist.html
+			-user defineable app settings, incl. video settings
+			-filter comm log
+			-iphone login screen - need scrollable or something
+			-tablet - need option to leave controls visible
+			-tilt controls??? leave until next version
+			-set light levels on login
+			-toast messages (stream, connection)
+			-status levels--change 'comm log' button to 'status' and show comm log off bottom of statuses
+			  -add 'refresh' button to status screen
+			  -ping only on status screen load, and refresh (not complicated anti-command stuffing like client.js, too much overhead for air app)
+			-add chat/speak control
+			-add motion enable/disable control
+			-keep device awake
+			-logout if connection closed
+			-layout of status screen sucks on ipad
+			-spash screen
+			*/
+			
+			import spark.managers.PersistenceManager;
+			private var persistenceMgr:PersistenceManager = new PersistenceManager();
+						
+			private var nc:NetConnection;
+			private var ns1:NetStream;
+			private var video:Video;
+			private var connected:Boolean = false;
+			private var username:String;
+			private var tapdelaytimer:Array = [];
+			private var tapdelaydefault:int = 130;
+			private var tapdelay:int;
+			private var defaultviewdelaytimer:Array = [];
+			private var defaultviewdelay:int = 2000;
+			private var toastdelay:int = 2000;
+			private var toastdelaytimer:Number;
+			private var lowAlpha:Number = 0.15;
+			private var medAlpha:Number = 0.7;
+			private var hiAlpha:Number = 1;
+			private var offAlpha:Number;
+			private var buttonflashtimer:Array = [];
+			private var buttonflashdelay:int = 200;
+			private var controlsalpha:Number =0;
+
+			private var os:String = "iOS"; // android ios
+//			private var os:String = "android"; // android ios
+			
+			private var moving:Boolean = false;
+			private var movingforward:Boolean = false;
+			private var turning:Boolean = false;
+			private var cameramoving:Boolean = false;
+			
+			private var pingTime:Date;
+			private var logString:String = "";
+			private var statusString:String = "";
+			private var statusHash:Array = ["connection","UPLINK","unknown","lag","PING","unknown","motion","MOTION","unknown",
+				"stream","VIDEO","unknown","speed","SPEED","unknown","cameratilt","CAMERA TILT","unknown",
+				"battery","BATTERY","unknown","dock","DOCK","unknown","user","USER","unknown"];
+			
+			protected function init():void {
+				username = data[2];
+				connect();
+				controlButtonsAlpha(medAlpha);
+				
+				offAlpha = 0;
+				tapdelay = tapdelaydefault;
+				persistenceMgr.load();
+				if (persistenceMgr.getProperty("controlsvisible") == null) {
+					persistenceMgr.setProperty("controlsvisible",false);
+					controlsvisibleCB.selected = false;
+				}
+				else if (persistenceMgr.getProperty("controlsvisible") == true) {
+					offAlpha = lowAlpha+.01;
+					controlsvisibleCB.selected = true;
+					tapdelay = 10;
+				}
+			}
+			
+			protected function connect():void {
+				nc = new NetConnection();
+				var address:String = "rtmp://"+data[0]+":"+data[1]+"/oculusPrime";
+				var passcode:String = data[2]+" "+data[3]+" nil";	
+				nc.connect(address, passcode);
+				nc.addEventListener(NetStatusEvent.NET_STATUS, netStatusHandler);
+				nc.client = this;
+//				nc.addEventListener("play",play); 
+//				nc.addEventListener("message",message);
+				nc.addEventListener("videoSoundMode",videoSoundMode); // called by java after successful playersignin--set mode (depending on server/client OS)
+				nc.addEventListener("flipVideo",flipVideo); // called by java				
+
+				nc.call("playersignin",null);
+
+				logmessage("connecting to: "+address+"\nusername: "+data[2]);
+//				logmessage("using passcode: "+passcode); //TODO: remove this
+				
+				//NativeApplication.nativeApplication.addEventListener(Event.DEACTIVATE, onDeactivateApp);
+				
+			}
+			
+			public function flipVideo(flip:Boolean):void {
+				if (flip) { video.scaleY = video.scaleY *-1; video.y = video.height; }
+				else { video.scaleY = video.scaleY *-1; video.y = 0;}
+			}
+			
+			protected function netStatusHandler(e:NetStatusEvent):void  {    
+				var code:String = e.info.code;
+				logmessage("netstream returned: "+code);
+				if(code == "NetConnection.Connect.Success"){ 
+					connected = true;
+					// ns1 = new NetStream(nc); // moved below due to seek errors on connect when video already running
+					video = new Video(); 
+					logmessage("connected");
+					
+//					if (os=="iOS") {  callServer("videosoundmode","low"); }
+//					else {  callServer("videosoundmode","high"); } //android -- high mode doesn't work in cam only mode?
+					callServer("videosoundmode","low");
+					
+					quitbutton.label = "LOGOUT";
+				}
+				if(code == "NetConnection.Connect.Closed") {
+					logmessage("connection closed");
+					quitbutton.label = "LOGIN";
+					toast("Oculus Disconnected");
+				}
+			}
+			
+			public function play(nostreams:int):void {
+				if (connected) {
+					if (ns1) { ns1.close(); }
+					else { 	ns1 = new NetStream(nc); }
+					if (video) { video.clear(); }
+					if (nostreams==0) {
+						message("playing 0 streams","blue", null, null);
+
+					}
+					else {
+						videoDisplay.visible = true;
+						video.attachNetStream(ns1);
+						var aspect:Number = video.width/video.height;
+						//video.width = videoDisplay.width;
+						video.height = videoDisplay.height;
+						video.width = video.height * aspect;
+						video.x = (videoDisplay.width/2) - (video.width/2);
+						videoDisplay.addChild(video);
+						
+//						ns1.bufferTime = 0;
+						ns1.play("mp4:stream1");
+//						ns1.receiveAudio(false);
+						message("playing stream","blue", null, null);
+						
+					}
+				}
+			}
+			
+			public function videoSoundMode(mode:String):void //set codec params for video and sound published by client
+			{
+				// publishing capabilities from mobile app not implemented 				
+			}
+			
+			public function message(str:String, colour:String, status:String, value:String):void {
+				// ExternalInterface.call("message",str,colour,status,value);
+				if (str != null && str != "status check received") { logmessage(str); }
+
+				if (status != null) {  
+					//logmessage(status+": "+value);
+					if (status == "multiple") { setstatusmultiple(value); }
+					else { setstatus(status, value); }
+				}
+			}		
+			
+			protected function setstatusmultiple(value:String):void {
+				var statusarray:Array = new Array();
+				statusarray = value.split(" ");
+				for (var i:int = 0; i<statusarray.length; i+=2) {
+					setstatus(statusarray[i], statusarray[i+1]);
+				}
+			}
+			
+			protected function setstatus(status:String, value:String):void {
+				var str:String = "";
+				if (status=="cameratilt") { value += "°"; }
+				for (var i:int; i<statusHash.length; i+=3) {
+					if (statusHash[i]==status) {
+						statusHash[i+2]=value.toLowerCase();
+					}
+					if (statusHash[i]=="lag") {
+						var d:Date = new Date();
+						var n:int = d.time;
+						n = n - pingTime.time;
+						statusHash[i+2] = n.toString()+"ms";
+						pingTime = d;
+//						trace(n);
+					}
+					str += statusHash[i+1]+":  "+statusHash[i+2]+"\n";
+				}
+				if (str != statusString) {
+					statusString = str;
+				}
+				if (status == "light") {
+					lightcontrols.visible = true;
+					spotlightSlider.value = int(value)/10;
+//					trace("light: "+value);
+						//(Math.round(spotlightSlider.value)*10).toString());
+				}
+				if (status == "floodlight") {
+					if (int(value)>0) { floodlightCB.selected = true; }
+					else { floodlightCB.selected = false; } 
+				}
+				
+				if (status=="stream") {
+					var num:int = 1;
+					if (value == "stop") { num =0 ; }
+					else { toast("video stream: "+value); }
+					play(num);
+				}
+				if (status=="someonealreadydriving" || status=="hijacked") { someoneAlreadyDriving(value); }
+				if (status=="connection" && value=="connected") { 
+					callServer("statuscheck","");
+					toast("Connected to Oculus");
+					someonealreadydrivingdialog.visible = false;
+				} //battcheck included automatically on 1st check 
+			}
+			
+			protected function logmessage(str:String):void {
+//				var previousText:String = msgbox.text.substr(0,1000);
+//				 msgbox.text = "•"+str+"\n"+previousText; 
+				 var previousText:String = logString.substr(0,1500);
+				 logString = "•"+str+"\n"+previousText; 
+				 if (msgboxcontainer.visible == true) { msgbox.text = statusString + "\nCOMM LOG:\n"+logString; }
+			}
+			
+			protected function callServer(fn:String, str:String):void {
+				if (connected) {
+					nc.call("playerCallServer", null, fn, str); 
+				}
+				logmessage("sending: "+fn+", "+str);
+				pingTime = new Date();
+			}
+
+			protected function quit():void {
+				if (nc) {
+					callServer("playerexit","");
+					nc.close(); 
+				}
+				if (navigator) { navigator.popView(); }
+			}
+			
+			protected function camera(mode:String):void { // modes: camandmic camera mic stop
+				callServer("publish",mode); 
+				logmessage("calling publish "+mode);
+			}
+			
+			protected function streamSet(mode:String):void { //modes: low med high
+				callServer("streamsettingsset", mode);
+				toast("stream set to: "+mode);
+			}
+			
+			protected function someoneAlreadyDriving(user:String):void {
+				show(someonealreadydrivingdialog);
+				someonealreadydrivinglabel.text = user.toUpperCase()+" is at the controls of OCULUS\nChoose action:";
+			}
+			
+			protected function someoneAlreadyDrivingAction(action:String):void {
+				callServer(action, username);
+				defaultView();
+			}
+			
+			protected function clearIntervalArray(a:Array):void {
+				trace(a.length);
+				for (var i:int=0; i<a.length; i++) {
+//					trace(a[i]+" "+i);
+					clearInterval(a[i]);
+				}
+//				trace(" ");
+			}
+				
+			protected function show(container:Group):void {
+//				clearInterval(defaultviewdelaytimer);
+				clearIntervalArray(defaultviewdelaytimer);
+				defaultviewdelaytimer = [];
+				menu.visible = false;
+				msgboxcontainer.visible = false; 
+					msgbox.text='';
+				someonealreadydrivingdialog.visible = false;
+				controls.visible = false;
+				controlsoverlay.enabled = false;
+				settingsboxcontainer.visible = false;
+				container.visible = true;
+			}
+			
+			protected function defaultView():void {
+				controls.visible = true;
+				controlButtonsAlpha(offAlpha);
+				controlsoverlay.enabled = true;
+				menu.visible = false;
+				msgboxcontainer.visible = false; 
+					msgbox.text='';
+				someonealreadydrivingdialog.visible = false;
+				settingsboxcontainer.visible = false;
+				clearIntervalArray(defaultviewdelaytimer);
+				defaultviewdelaytimer = [];
+			}
+			
+			protected function controlsoverlay_clickHandler(event:MouseEvent):void {  // screen touched
+//				clearInterval(tapdelaytimer);
+				clearIntervalArray(tapdelaytimer);
+				tapdelaytimer = [];
+//				clearInterval(defaultviewdelaytimer);
+				clearIntervalArray(defaultviewdelaytimer);
+				defaultviewdelaytimer = [];
+//				defaultviewdelaytimer = setInterval(defaultView, defaultviewdelay);
+				defaultviewdelaytimer.push(setInterval(defaultView, defaultviewdelay));
+				var delay:int;
+				if (controlsalpha==offAlpha) {
+					delay = tapdelay;
+					controlButtonsAlpha(lowAlpha);
+				}
+				else { 
+					delay = 1; 
+					controlButtonsAlpha(lowAlpha);
+				}
+//				tapdelaytimer = setInterval(buttonCheck, delay, event.localX, event.localY);
+				tapdelaytimer.push(setInterval(buttonCheck, delay, event.localX, event.localY));
+			}
+			
+			protected function buttonCheck(x:Number, y:Number):void {  // if touch still down after tapdelay 
+				// iterate through controls buttons, see if xy is over, if so, click
+//				clearInterval(tapdelaytimer);
+				clearIntervalArray(tapdelaytimer);
+				tapdelaytimer = [];
+				var buttonIds:Array= ["stopbutton", "menubutton", "leftbutton", "rightbutton", "fwdbutton", "backbutton",  
+					"camupbutton", "camdownbutton", "camhorizbutton"];
+				var targetButton:Button = null;
+				for (var i:int=0; i<buttonIds.length; i++) {
+					var b:Button = this[buttonIds[i]];
+					var pt:Point = new Point(b.x, b.y);
+					pt = b.parent.localToGlobal(pt);
+					pt = parent.globalToLocal(pt);
+					var bx:Number = pt.x;
+					var by:Number = pt.y;
+					if (x > bx && x < bx + b.width && y > by && y < by + b.height) {
+						targetButton = b;
+						break;
+					}
+				}
+				if (targetButton != null) { 
+					controlButtonsAlpha(offAlpha);
+					targetButton.dispatchEvent(new MouseEvent(MouseEvent.CLICK));
+					targetButton.alpha = hiAlpha;
+//					clearInterval(buttonflashtimer);
+					clearIntervalArray(buttonflashtimer);
+					buttonflashtimer = [];
+//					buttonflashtimer = setInterval(buttonFlashOff, buttonflashdelay, targetButton);
+					buttonflashtimer.push(setInterval(buttonFlashOff, buttonflashdelay, targetButton));
+				}
+				else { controlButtonsAlpha(medAlpha); }
+			}
+			
+			protected function controlButtonsAlpha(a:Number):void {
+				var buttonIds:Array= ["stopbutton", "menubutton", "leftbutton", "rightbutton", "fwdbutton", "backbutton",  
+					"camupbutton", "camdownbutton", "camhorizbutton"];
+				for (var i:int=0; i<buttonIds.length; i++) {
+					var b:Button = this[buttonIds[i]];
+					b.alpha=a;
+				}
+				controlsalpha = a;
+			}
+			
+			protected function buttonFlashOff(b:Button):void {
+//				clearInterval(buttonflashtimer);
+				clearIntervalArray(buttonflashtimer);
+				buttonflashtimer = [];
+				b.alpha = offAlpha;
+			}
+			
+			protected function moveBotForward():void {
+				if (movingforward) {
+					turning = false;
+					movingforward = false;
+					moving = false;
+					callServer("move","stop");
+				}
+				else { 
+					movingforward = true;
+					turning = false;
+					moving = true;
+					callServer("move","forward");
+				}
+			}
+			
+			protected function moveBotBackward():void {
+				moving = true;
+				movingforward = false;
+				turning = false;
+				callServer("move","backward");
+			}
+			
+			protected function moveBotStop():void {
+				moving = false;
+				turning = false;
+				movingforward = false;
+				callServer("move","stop");
+			}
+			
+			protected function moveBotTurn(direction:String):void {
+				moving = true;
+				turning = true;
+				callServer("move",direction);
+			}
+
+			protected function cameramove(str:String):void {
+				if (str=="stop" || str=="horiz") { cameramoving = false; }
+				else { cameramoving = true; }
+				callServer('cameracommand',str);
+			}
+			
+			protected function controlsoverlayUp():void {
+//				clearInterval(tapdelaytimer);
+				clearIntervalArray(tapdelaytimer);
+				tapdelaytimer = [];
+				
+				/*
+				if (moving) {
+					if (movingforward && turning) {
+						turning = false;
+						callServer("move","forward");
+					}
+					else {
+						if (!movingforward) { moveBotStop(); }
+					}
+				}
+				*/
+				
+				if (moving && movingforward && turning) {
+					turning = false;
+					callServer("move","forward");
+				}
+				if (moving && !movingforward) {
+					moveBotStop();
+				}
+				
+				if (cameramoving) { cameramove("stop"); }
+				if (controlsalpha == lowAlpha) { controlButtonsAlpha(medAlpha); }
+			}
+			
+			protected function floodlight():void {
+				if (floodlightCB.selected) 
+					{ callServer("floodlight","100"); }
+				else { callServer("floodlight","0"); }
+			}
+			
+			protected function spotlight():void {
+				callServer("spotlight", (Math.round(spotlightSlider.value)*10).toString());
+			}
+			
+			protected function showSettings():void {
+				show(settingsboxcontainer);
+			}
+			
+			protected function showStatus():void {
+				show(msgboxcontainer);
+				msgbox.text = statusString + "\nCOMM LOG:\n"+logString;
+				callServer("statuscheck","battcheck"); //include battery check, not included by default
+			}
+			
+			protected function toast(msg:String):void {
+				clearInterval(toastdelaytimer);
+				toastbox.text = msg;
+				toastbox.visible = true;
+				toastdelaytimer = setInterval(toastOff, toastdelay);
+			}
+			
+			protected function toastOff():void {
+				clearInterval(toastdelaytimer);
+				toastbox.visible = false;
+			}
+			
+			protected function oculusCommand():void {
+				var str:String = oculuscommand.text;
+				str = str.replace(/^\s+|\s+$/g,''); // strip
+				var cmd:Array = str.split(" ",1);
+				var val:String = str.substring(cmd[0].length+1);
+				callServer(cmd[0], val);
+			}
+			
+			protected function controlsVisibleToggle():void {
+				if (controlsvisibleCB.selected == true) {
+					persistenceMgr.setProperty("controlsvisible",true);
+					offAlpha = lowAlpha+.01;
+					tapdelay = 10;
+				}
+				else {
+					persistenceMgr.setProperty("controlsvisible",false);
+					offAlpha = 0;
+					tapdelay = tapdelaydefault;
+				}
+				persistenceMgr.save();
+			}
+			
+		]]>
+	</fx:Script>
+	
+	<fx:Declarations>
+		<!-- Place non-visual elements (e.g., services, value objects) here -->
+	</fx:Declarations>
+
+	
+	<s:Rect width="100%" height="100%" >
+		<s:fill><s:SolidColor color="#000000" /></s:fill>
+	</s:Rect>
+	
+	<!-- VIDEO DISPLAY -->
+	<s:VideoDisplay id="videoDisplay" visible="false" left="0" right="0" top="0" bottom="0" />
+	
+	<!-- BASE CONTROLS -->
+	<s:Group id="controls" left="10" right="10" bottom="15" height="285" horizontalCenter="0">
+		<s:Button id="leftbutton" left="0" width="70" height="40%" icon="assets/controls/left.png" cacheAsBitmap="true" verticalCenter="0" click="moveBotTurn('left');" />
+		
+		<s:Group left="92" height="100%">
+			<s:Button id="menubutton" top="0" width="70" height="40%" icon="assets/controls/menu.png" cacheAsBitmap="true" click="show(menu);" />
+			<s:Button id="stopbutton" x="0" bottom="0" width="70" height="40%" icon="assets/controls/stop.png" cacheAsBitmap="true" click="moveBotStop();"/>
+		</s:Group>
+		
+		<s:Group height="100%" right="184">
+			<s:Button id="camupbutton" top="0" width="70" height="30%" icon="assets/controls/cam_up.png" cacheAsBitmap="true" click="cameramove('up');" />
+			<s:Button id="camdownbutton" x="0" bottom="0" width="70" height="30%" icon="assets/controls/cam_down.png" cacheAsBitmap="true" click="cameramove('down');"/>
+			<s:Button id="camhorizbutton" x="0" width="70" height="30%" icon="assets/controls/cam_horiz.png" cacheAsBitmap="true" click="cameramove('horiz');"
+					  verticalCenter="0"/>
+		</s:Group>
+		
+		<s:Group right="92" height="100%">
+			<s:Button id="fwdbutton" top="0" width="70" height="40%" icon="assets/controls/fwd.png" cacheAsBitmap="true" click="moveBotForward();"/>
+			<s:Button id="backbutton" x="0" bottom="0" width="70" height="40%" icon="assets/controls/back.png"  cacheAsBitmap="true" click="moveBotBackward();"/>
+		</s:Group>
+		
+		<s:Button id="rightbutton" right="0" width="70" height="40%" icon="assets/controls/right.png" cacheAsBitmap="true" verticalCenter="0" click="moveBotTurn('right');"/>
+	</s:Group>
+	
+	<s:Button id="controlsoverlay" left="0" right="0" top="0" bottom="0" mouseDown="controlsoverlay_clickHandler(event)" 
+			  mouseUp="controlsoverlayUp()" alpha="0"/>
+
+	<!-- MAIN MENU -->
+	<s:Group id="menu" left="0" right="0" top="0" bottom="0" visible="false" alpha="0.75">
+		<s:Rect width="100%" height="100%" >
+			<s:fill><s:SolidColor color="#FFFFFF" /></s:fill>
+		</s:Rect>
+		<s:Group width="450" horizontalCenter="0" verticalCenter="0">
+			<s:Button left="0" top="0" width="29%" label="Camera ON" click="camera('camera');"/>
+			<s:Button id="quitbutton" right="0" top="0" width="29%" label="LOGIN" click="quit();"/>
+			<s:Button y="53" right="0" width="29%" label="Status" click="showStatus();"/>
+			<s:Button x="0" y="106" width="29%" label="Cam-Mic OFF" click="camera('stop');"/>
+			<s:Button y="53" left="0" width="29%" label="Cam-Mic ON" click="camera('camandmic');"/>
+			<s:Button top="0" width="29%" label="Un-Dock" horizontalCenter="0" click="callServer('dock','undock');"/>
+			<s:Button y="53" width="29%" label="Auto-Dock" horizontalCenter="0" click="callServer('autodock','go'); floodlightCB.selected = false"/>
+			<s:Button y="106" width="29%" label="Manual Dock" horizontalCenter="0" click="callServer('dock','dock');"/>
+			<s:Button bottom="0" width="29%" label="More >>" horizontalCenter="0" click="showSettings();"/>
+			<s:Group id="lightcontrols" visible="false"  y="127" right="0" width="29%">
+				<s:Label right="20" alpha="1.0" backgroundAlpha="0.6" 
+						 paddingBottom="3" paddingLeft="3" paddingRight="3" paddingTop="3" text="Spotlight"/> 
+				<s:HSlider y="19" width="100%" id="spotlightSlider" change="spotlight();"
+						   liveDragging="false"/>
+				
+				<s:CheckBox id="floodlightCB" y="55" right="15" label="Floodlight" click="floodlight();" />
+			</s:Group>
+			<s:Button left="0" bottom="0" width="29%" label="CLOSE MENU" click="defaultView();"/>
+		</s:Group>
+	</s:Group>
+	
+	<!-- MESSAGE BOX -->
+	<s:Group id="msgboxcontainer" visible="false" left="0" right="0" top="0" bottom="0" alpha="0.75">
+		<s:Rect width="100%" height="100%">
+			<s:fill><s:SolidColor color="#FFFFFF" /></s:fill>
+		</s:Rect>
+		<s:Scroller id="msgboxcontainerscroller" right="0" top="0" bottom="0" width="80%"  >
+			<s:Group width="100%" height="100%">
+				<s:Label id="msgbox" width="100%" text="Neque porro quisquam est qui dolorem ipsum quia dolor sit amet, consectetur, adipisci velit"  
+						 paddingLeft="5" paddingRight="5" paddingTop="5" paddingBottom="5" />
+			</s:Group>
+		</s:Scroller>
+		<s:Group left="0" top="0" bottom="0" width="20%">
+			<s:Button horizontalCenter="0" y="20" width="80%" label="CLOSE" click="defaultView();"/>
+			<s:Button horizontalCenter="0" y="80" width="80%" label="BACK" click="show(menu);"/>
+			<s:Button horizontalCenter="0" y="140" width="80%" label="Reload" click="showStatus();"/>
+		</s:Group>	
+	</s:Group>
+	
+	<!-- SOMEONEALREADY DRIVING -->
+	<s:Group id="someonealreadydrivingdialog" visible="false" width="369" height="243" horizontalCenter="0" verticalCenter="0" alpha="0.75">
+		<s:Rect width="100%" height="100%" >
+			<s:fill><s:SolidColor color="#FFFFFF" /></s:fill>
+		</s:Rect>
+		<s:Label id="someonealreadydrivinglabel" y="28" horizontalCenter="0" text="" />
+		<s:Button id="assumecontrol" y="72" label="ASSUME CONTROL" horizontalCenter="0" click="someoneAlreadyDrivingAction('assumecontrol');"/>
+		<s:Button id="beapassenger" y="123" label="BE A PASSENGER" horizontalCenter="0" 
+				  click="someoneAlreadyDrivingAction('beapassenger'); setstatus('connection','PASSENGER');"/>
+		<s:Button id="logoutbutton" y="174" label="LOGOUT" horizontalCenter="0" click="quit();" />
+	</s:Group>
+	
+	<!-- SETTINGS BOX -->	
+	<s:Group id="settingsboxcontainer" left="0" right="0" top="0" bottom="0" visible="false" alpha="0.75">
+		<s:Rect width="100%" height="100%" >
+			<s:fill><s:SolidColor color="#FFFFFF" /></s:fill>
+		</s:Rect>
+		<s:Group verticalCenter="0" height="250" width="450" horizontalCenter="0">
+			<s:Group top="0" width="100%">
+				<s:Label x="0" y="0" text="Send text command:"/>
+				<s:Group y="20" width="100%" >
+					<s:TextInput id="oculuscommand" x="0" y="5" width="85%" skinClass="spark.skins.mobile.TextInputSkin" />
+					<s:Button right="0" y="0" label="Go" click="oculusCommand();"/>
+				</s:Group>
+			</s:Group>
+			<s:Group top="85" width="100%">
+				<s:Label left="0" width="30%" verticalCenter="0" text="Video Quality:"/> 
+				<s:Group right="0" width="70%" >
+					<s:Button left="0" width="29%" label="low" click="streamSet('low');"/>		
+					<s:Button horizontalCenter="0" width="29%" label="med" click="streamSet('med');"/>
+					<s:Button right="0" width="29%" label="high" click="streamSet('high');"/>
+					
+				</s:Group>
+			</s:Group>
+			<s:CheckBox id="controlsvisibleCB" y="145" x="0" label="Controls always visible" click="controlsVisibleToggle();" />
+			<s:Button left="0" bottom="0" width="29%" label="CLOSE" click="defaultView();"/>
+			<s:Button horizontalCenter="0" bottom="0" width="29%" label="BACK" click="show(menu);"/>
+		</s:Group>
+	</s:Group>
+	
+	<s:Label id="toastbox" visible = "false" horizontalCenter="0"  bottom="100" color="#ffffff" backgroundColor="#000000"  alpha="0.8" 
+			 paddingLeft="10" paddingRight="10" paddingTop="10" paddingBottom="10"/>
+	
+</s:View>

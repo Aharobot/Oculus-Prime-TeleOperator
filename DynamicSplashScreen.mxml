@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:SplashScreenImage xmlns:fx="http://ns.adobe.com/mxml/2009" xmlns:s="library://ns.adobe.com/flex/spark">    
+	<s:SplashScreenImageSource dpi="160" aspectRatio="landscape" source="@Embed('assets/splash160.png')"/>   
+	<s:SplashScreenImageSource dpi="240" aspectRatio="landscape" source="@Embed('assets/splash240.png')"/>
+	<s:SplashScreenImageSource dpi="320" aspectRatio="landscape" source="@Embed('assets/splash320.png')"/>
+</s:SplashScreenImage>

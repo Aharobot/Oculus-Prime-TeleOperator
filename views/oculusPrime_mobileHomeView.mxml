@@ -1,0 +1,103 @@
+<?xml version="1.0"?>
+<s:View xmlns:fx="http://ns.adobe.com/mxml/2009" 
+		xmlns:s="library://ns.adobe.com/flex/spark" updateComplete="init();" 
+		actionBarVisible="false" 
+		xmlns:mx="library://ns.adobe.com/flex/mx"
+		tabBarVisible="false" title="Oculus Prime Login">
+	
+	<fx:Script>
+		<![CDATA[
+			
+			// activate="stage.setAspectRatio(StageAspectRatio.LANDSCAPE);" // was in view declaration, crashes android ics on resume
+			
+			import spark.managers.PersistenceManager;
+			private var persistenceMgr:PersistenceManager = new PersistenceManager();
+			
+			private function init():void {
+				
+				persistenceMgr.load();
+				if (persistenceMgr.getProperty("port") != null) {
+					port.text = persistenceMgr.getProperty("port") as String;
+				}
+				else { port.text = "1935"; }
+				
+				if (persistenceMgr.getProperty("address") != null) {
+					address.text = persistenceMgr.getProperty("address") as String;
+				}
+				if (persistenceMgr.getProperty("username") != null) {
+					username.text = persistenceMgr.getProperty("username") as String;
+				}
+				if (persistenceMgr.getProperty("username") != null) {
+					username.text = persistenceMgr.getProperty("username") as String;
+				}
+				if (persistenceMgr.getProperty("password") != null) {
+					password.text = persistenceMgr.getProperty("password") as String;
+				}
+				
+				
+			}
+			
+			
+			protected function button1_clickHandler(event:MouseEvent):void
+			{
+				persistenceMgr.setProperty("address",address.text);
+				persistenceMgr.setProperty("port",port.text);
+				persistenceMgr.setProperty("username",username.text);
+				persistenceMgr.setProperty("password",password.text);
+				persistenceMgr.save();
+				var loginDetails:Array =  new Array (address.text, port.text, username.text, password.text ); 
+				navigator.pushView(botView, loginDetails);
+			}
+			
+			
+			
+			protected function quit():void {
+				persistenceMgr.setProperty("password",null);
+				NativeApplication.nativeApplication.exit();
+			}
+			
+			/*
+			private function changeField(ti:TextInput):void {
+				// Before changing focus to a new control, set the stage's focus to null:
+				stage.focus = null;
+				
+				// Set focus on the TextInput that was passed in:
+				ti.setFocus();
+			}
+			*/
+			
+		]]>
+	</fx:Script>
+	
+	<fx:Declarations>
+		<!-- Place non-visual elements (e.g., services, value objects) here -->
+	</fx:Declarations>
+
+
+	<s:Scroller top="25" width="455" horizontalCenter="0">
+		<s:Group right="0" top="0" bottom="0" left="0" >
+			<s:TextInput id="address" x="96" y="10" width="350" skinClass="spark.skins.mobile.TextInputSkin" />
+			<s:Label x="10" y="10" text="Domain or&#xd;IP address"/>
+			<s:TextInput id="username" x="96" y="55" width="350" skinClass="spark.skins.mobile.TextInputSkin" />
+			<s:Label x="10" y="65" text="Username"/>
+			<s:TextInput id="password" x="96" y="100" width="350" displayAsPassword="true" skinClass="spark.skins.mobile.TextInputSkin" />
+			<s:Label x="10" y="110" text="Password" />
+			<s:Label x="10" y="146" text="RTMP &#xd;Port"/>
+			<s:Group x="96" y="144" width="350" height="37">
+				<s:Button id="connect" right="0" top="-0" height="33" label="Connect"
+						  click="button1_clickHandler(event)"/>
+				<s:TextInput id="port" y="0" left="0" width="82" skinClass="spark.skins.mobile.TextInputSkin" />
+				<!-- <s:Button horizontalCenter="0" top="0" height="33" label="Quit" click="NativeApplication.nativeApplication.exit();"/> -->
+			</s:Group>
+			<s:Image right="10" y="225">
+				<s:source>
+					<s:MultiDPIBitmapSource source160dpi="assets/oculus_prime.png" source240dpi="assets/oculus_prime.png"
+											source320dpi="assets/oculus_prime.png"/>
+				</s:source>
+			</s:Image>
+		</s:Group>
+	</s:Scroller>
+
+	
+</s:View>
+
